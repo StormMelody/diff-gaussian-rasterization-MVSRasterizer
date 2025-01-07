@@ -15,15 +15,18 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
+def render(viewpoint_camera_list, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     """
     Render the scene. 
     
     Background tensor (bg_color) must be on GPU!
     """
- 
+    num_views = len(viewpoint_camera_list)
+    viewpoint_camera = viewpoint_camera_list[0]
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda").repeat(2,1) + 0
+    # screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda").repeat(2,1) + 0
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda").repeat(num_views,1) + 0
+
     try:
         screenspace_points.retain_grad()
     except:
@@ -32,6 +35,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    camera_centers = torch.stack([camera.camera_center for camera in viewpoint_camera_list]).cuda()
 
     raster_settings = GaussianRasterizationSettings(
         image_height=int(viewpoint_camera.image_height),
@@ -40,14 +44,14 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         tanfovy=tanfovy,
         bg=bg_color,
         scale_modifier=scaling_modifier,
-        viewmatrix=viewpoint_camera.world_view_transform.repeat(2,1),
-        projmatrix=viewpoint_camera.full_proj_transform.repeat(2,1),
+        viewmatrix=viewpoint_camera.world_view_transform.repeat(num_views,1),
+        projmatrix=viewpoint_camera.full_proj_transform.repeat(num_views,1),
         sh_degree=pc.active_sh_degree,
-        campos=viewpoint_camera.camera_center,
+        campos=camera_centers,
         prefiltered=False,
         debug=pipe.debug,
         antialiasing=pipe.antialiasing,
-        num_views=2
+        num_views=num_views
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -89,29 +93,29 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     if colors_precomp:
-        colors_precomp = colors_precomp.repeat(2,1)
+        colors_precomp = colors_precomp.repeat(num_views,1)
     if cov3D_precomp:
-        cov3D_precomp = cov3D_precomp.repeat(2,1)
+        cov3D_precomp = cov3D_precomp.repeat(num_views,1)
     if separate_sh:
         rendered_image, radii, depth_image = rasterizer(
-            means3D = means3D.repeat(2,1),
+            means3D = means3D.repeat(num_views,1),
             means2D = means2D,
-            dc = dc.repeat(2,1),
-            shs = shs.repeat(2,1),
+            dc = dc.repeat(num_views,1),
+            shs = shs.repeat(num_views,1,1),
             colors_precomp = colors_precomp,
-            opacities = opacity.repeat(2,1),
-            scales = scales.repeat(2,1),
-            rotations = rotations.repeat(2,1),
+            opacities = opacity.repeat(num_views,1),
+            scales = scales.repeat(num_views,1),
+            rotations = rotations.repeat(num_views,1),
             cov3D_precomp = cov3D_precomp)
     else:
         rendered_image, radii, depth_image = rasterizer(
-            means3D = means3D.repeat(2,1),
+            means3D = means3D.repeat(num_views,1),
             means2D = means2D,
-            shs = shs.repeat(2,1,1),
+            shs = shs.repeat(num_views,1,1),
             colors_precomp = colors_precomp,
-            opacities = opacity.repeat(2,1),
-            scales = scales.repeat(2,1),
-            rotations = rotations.repeat(2,1),
+            opacities = opacity.repeat(num_views,1),
+            scales = scales.repeat(num_views,1),
+            rotations = rotations.repeat(num_views,1),
             cov3D_precomp = cov3D_precomp)
     
     # Apply exposure to rendered image (training only)
